@@ -1,0 +1,30 @@
+# Environment & secrets
+.env
+*.env
+
+# Database
+*.db
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Data files (contains call logs, phone numbers, etc.)
+data/
+
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
