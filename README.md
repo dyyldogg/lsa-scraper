@@ -1,252 +1,181 @@
-# 🌙 Nightline - AI-Powered Lead Generation
+# LSA Scraper + AI Caller
 
-**Find businesses claiming 24/7 service that fail to answer the phone.**
+**Scrape Google Local Services Ads (sponsored listings) for any industry, then AI-call them to find businesses that miss after-hours calls.**
 
-Nightline automates the discovery and validation of high-value leads by:
-1. **Scraping** businesses from Google Maps that advertise "24/7", "Emergency", or "Always Available" service
-2. **Testing** their phone lines at various times to see if they actually answer
-3. **Qualifying** leads that go to voicemail - these are your sales opportunities
+Works for: HVAC, Private Investigators, Plumbers, Electricians, Locksmiths, Lawyers — or add your own.
 
 ## The Pitch
 
-> "I called your '24/7' emergency line at 2 AM last night and it went to voicemail. You likely lost a $1,500 job. Nightline would have booked that for you."
+> "I called your '24/7' emergency line at 2 AM last night and it went to voicemail. You likely lost a $1,500 job. We would have booked that for you."
 
-## Quick Start
+---
 
-### 1. Install Dependencies
-
-```bash
-cd /Users/dylanrochex/Projects/HVAC_leads_googleads
-pip install -r requirements.txt
-```
-
-### 2. Configure Environment
+## Setup (Any Machine)
 
 ```bash
-cp env.example .env
-# Edit .env with your API keys
+git clone https://github.com/dyyldogg/lsa-scraper.git
+cd lsa-scraper
+chmod +x setup.sh && ./setup.sh
 ```
 
-Required API keys:
-- **RapidAPI Key**: For Google Maps Local Business Data API
-- **Twilio Credentials**: For automated phone calls (optional for mock mode)
+That installs everything: Python packages, Playwright, Chromium browser, and creates your `.env`.
 
-### 3. Initialize Database
+### API Keys
+
+Edit `.env` with the keys you need:
+
+| What you're doing | Keys needed |
+|---|---|
+| **LSA Scraper only** | None — uses Playwright browser |
+| **AI Caller** (Vapi) | `VAPI_API_KEY` + `VAPI_PHONE_ID` |
+| **Legacy Maps scraper** | `RAPIDAPI_KEY` |
+
+**Vapi.ai setup** (for the AI caller):
+1. Sign up at [vapi.ai](https://vapi.ai)
+2. Dashboard → API Keys → copy your key → paste as `VAPI_API_KEY`
+3. Dashboard → Phone Numbers → import your Twilio number (or buy one)
+4. Click the number → copy the ID → paste as `VAPI_PHONE_ID`
+
+---
+
+## Usage
+
+### 1. Scrape LSA Leads (No API Key Needed)
 
 ```bash
-python main.py db init
+# Scrape PI firms in one city
+python3 -m nightline.cli lsa city pi "Los Angeles" CA
+
+# Scrape across all LA metro cities
+python3 -m nightline.cli lsa region pi los_angeles_metro
+
+# Scrape across ALL of California
+python3 -m nightline.cli lsa california pi
+
+# Show the browser while scraping (for debugging)
+python3 -m nightline.cli lsa city pi "San Diego" CA --visible
+
+# List available industries and regions
+python3 -m nightline.cli lsa industries
+python3 -m nightline.cli lsa regions
 ```
 
-### 4. Start Scraping Leads
+**Supported industries:** `hvac`, `pi`, `plumber`, `electrician`, `locksmith`, `lawyer`
+
+**California regions:** `los_angeles_metro`, `inland_empire`, `orange_county`, `san_diego`, `sf_bay_area`, `central_valley`
+
+### 2. AI Call the Leads (Needs Vapi Key)
 
 ```bash
-# Scrape HVAC leads from a specific city
-python main.py scrape city Denver CO --limit 50
+# Test with 1 call
+python3 vapi_caller.py --test
 
-# Or scrape multiple cities at once
-python main.py scrape multi -c "Denver,CO;Phoenix,AZ;Dallas,TX"
+# Call 10 leads
+python3 vapi_caller.py --limit 10
+
+# Call only businesses claiming 24/7 service
+python3 vapi_caller.py --limit 50 --24-only
+
+# Overnight autonomous mode (runs unattended, saves progress)
+nohup python3 overnight_caller.py > overnight.log 2>&1 &
 ```
 
-### 5. Run Audit Calls
+### 3. View Results
 
 ```bash
-# Test mode (no real calls)
-python main.py call audit --limit 10 --mock
+# List leads filtered by industry
+python3 -m nightline.cli leads list --industry pi --sponsored
 
-# Live calls (requires Twilio)
-python main.py call audit --limit 10
+# Show qualified leads (didn't answer = sales opportunity)
+python3 -m nightline.cli leads qualified --export leads.csv
+
+# Stats
+python3 -m nightline.cli leads stats
+
+# Web dashboard
+python3 -m nightline.cli dashboard
+# → Open http://localhost:8000
 ```
 
-### 6. View Qualified Leads
+### 4. Export for Google Sheets
 
 ```bash
-# See leads that didn't answer (ready for sales!)
-python main.py leads qualified
+# Export enriched call results
+python3 export_enriched.py
 
-# Export to CSV
-python main.py leads qualified --export leads.csv
+# Results in data/overnight_ENRICHED_SHEETS.tsv (tab-separated, paste into Sheets)
+# Qualified only: data/overnight_QUALIFIED_SHEETS.tsv
 ```
 
-## Web Dashboard
+---
 
-For a visual interface, run the web dashboard:
+## How It Works
 
-```bash
-python run_dashboard.py
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  LSA Scraper     │     │  AI Caller       │     │  Results         │
+│                  │     │                  │     │                  │
+│  Playwright hits │ ──→ │  Vapi.ai calls   │ ──→ │  Voicemail?      │
+│  Google LSA page │     │  each business   │     │  = QUALIFIED     │
+│  for any industry│     │  at 2 AM         │     │  = Sales lead    │
+│  in any city     │     │                  │     │                  │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
 ```
 
-Then open http://localhost:8000 in your browser.
+**LSA Scraper:** Opens Google's Local Services Ads page in a headless browser, scrolls through results, and extracts business names, phone numbers, ratings, and Google Guaranteed status. These are the *sponsored* businesses — they're paying for ads, which means they have budget.
 
-## CLI Commands
+**AI Caller:** Uses Vapi.ai (GPT-3.5 + Deepgram voice) to call each business. The AI stays silent, navigates IVR menus, and classifies the result: human answered, voicemail, answering service, or no answer. Cost: ~$0.08/min per call.
 
-### Scraping
+**Qualification:** Businesses that go to voicemail or don't answer = qualified leads. They claim to be available but aren't. That's your pitch.
 
-```bash
-# Scrape a single city
-nightline scrape city <CITY> <STATE> [--limit N]
+---
 
-# Scrape multiple cities
-nightline scrape multi -c "City1,ST1;City2,ST2" [--limit N]
+## Project Structure
+
+```
+├── setup.sh               # One-command setup
+├── env.example             # All config vars documented
+├── requirements.txt        # Python dependencies
+│
+├── nightline/
+│   ├── config.py           # Industry configs, CA cities, all settings
+│   ├── database.py         # SQLAlchemy models (Lead, CallAudit)
+│   ├── lsa_scraper.py      # Playwright-based Google LSA scraper
+│   ├── scraper.py          # Legacy Google Maps API scraper
+│   ├── cli.py              # CLI commands (nightline lsa/scrape/call/leads)
+│   └── dashboard.py        # FastAPI web dashboard
+│
+├── vapi_caller.py          # AI caller (interactive, single runs)
+├── overnight_caller.py     # Autonomous overnight caller (unattended)
+├── export_enriched.py      # Export call results for Google Sheets
+└── data/                   # All output files (gitignored)
 ```
 
-### Calling
+## Adding a New Industry
 
-```bash
-# Run audit call batch
-nightline call audit [--limit N] [--mock] [--all-leads]
-
-# Call a specific lead
-nightline call single <LEAD_ID> [--mock]
-```
-
-### Lead Management
-
-```bash
-# List all leads
-nightline leads list [--status STATUS] [--city CITY] [--24-7]
-
-# Show qualified leads (sales ready!)
-nightline leads qualified [--export FILE.csv]
-
-# Show statistics
-nightline leads stats
-```
-
-### Database
-
-```bash
-# Initialize database
-nightline db init
-
-# Reset database (delete all data)
-nightline db reset
-```
-
-## Configuration
-
-### env.example → .env
-
-```bash
-# RapidAPI - Local Business Data (for Google Maps scraping)
-RAPIDAPI_KEY=your_rapidapi_key_here
-
-# Twilio Configuration (for automated calls)
-TWILIO_ACCOUNT_SID=your_account_sid
-TWILIO_AUTH_TOKEN=your_auth_token
-TWILIO_PHONE_NUMBER=+1234567890
-
-# Optional: Your callback URL for Twilio webhooks
-TWILIO_WEBHOOK_URL=https://your-domain.com/api/twilio/callback
-
-# Database (defaults to SQLite)
-DATABASE_URL=sqlite:///nightline.db
-```
-
-### Search Queries
-
-Default search queries can be customized in `nightline/config.py`:
+Edit `nightline/config.py` and add to the `INDUSTRIES` dict:
 
 ```python
-DEFAULT_SEARCH_QUERIES = [
-    "24/7 HVAC repair",
-    "Emergency HVAC service",
-    "24 hour furnace repair",
-    "Emergency AC repair",
-    "24/7 heating repair",
-    "Emergency heating service",
-    "After hours HVAC",
-]
+INDUSTRIES = {
+    "roofing": {
+        "name": "Roofer",
+        "lsa_queries": [
+            "roofer",
+            "roof repair",
+            "emergency roof repair",
+        ],
+        "availability_keywords": [
+            "24/7", "emergency", "same day",
+        ],
+    },
+    # ... existing industries ...
+}
 ```
 
-### Availability Keywords
+Then scrape: `python3 -m nightline.cli lsa city roofing "Los Angeles" CA`
 
-Keywords used to detect 24/7 claims:
-
-```python
-AVAILABILITY_KEYWORDS = [
-    "24/7",
-    "24 hour",
-    "24-hour",
-    "around the clock",
-    "always available",
-    "emergency",
-    "after hours",
-    "nights and weekends",
-    "open 24",
-]
-```
-
-## Architecture
-
-```
-nightline/
-├── __init__.py       # Package initialization
-├── config.py         # Configuration management
-├── database.py       # SQLAlchemy models (Lead, CallAudit, etc.)
-├── scraper.py        # Google Maps scraping logic
-├── caller.py         # Twilio calling automation
-├── cli.py            # Command-line interface
-└── dashboard.py      # FastAPI web dashboard
-```
-
-## Lead Lifecycle
-
-```
-NEW → SCHEDULED → CALLED → QUALIFIED/DISQUALIFIED → CONTACTED → CONVERTED
-                              ↑                           ↑
-                        Voicemail/No Answer        Sales outreach
-                              ↓
-                        GOLD MINE! 💰
-```
-
-## API Endpoints (Dashboard)
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `/` | GET | Web dashboard |
-| `/api/stats` | GET | Overall statistics |
-| `/api/leads` | GET | List leads (with filters) |
-| `/api/leads/qualified` | GET | Qualified leads only |
-| `/api/leads/export` | GET | Export CSV |
-| `/api/scrape` | POST | Start scraping job |
-| `/api/calls/batch` | POST | Run call batch |
-| `/api/lead/{id}` | GET | Single lead with history |
-| `/api/twilio/callback` | POST | Twilio webhook |
-
-## Workflow Example
-
-### Daily Lead Generation
-
-```bash
-# Morning: Scrape new leads from target cities
-python main.py scrape multi -c "Denver,CO;Phoenix,AZ;Dallas,TX" --limit 100
-
-# Afternoon: Run audit calls (mock first to verify)
-python main.py call audit --limit 20 --mock
-
-# When ready for live calls:
-python main.py call audit --limit 20
-
-# Export qualified leads for sales team
-python main.py leads qualified --export qualified_$(date +%Y%m%d).csv
-```
-
-### Multiple Time-of-Day Testing
-
-For the most accurate results, test the same leads at different times:
-
-```bash
-# Evening test (7 PM)
-python main.py call audit --limit 10
-
-# Night test (scheduled via cron at 11 PM)
-python main.py call audit --limit 10
-
-# Weekend test
-python main.py call audit --limit 10
-```
+---
 
 ## License
 
-MIT License
-
+MIT

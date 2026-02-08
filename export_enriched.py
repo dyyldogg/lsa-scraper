@@ -7,11 +7,19 @@ import csv
 import os
 import requests
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from dotenv import load_dotenv
 
-VAPI_API_KEY = os.environ.get('VAPI_API_KEY', 'd6dc0c9c-3cc7-40f7-a67f-16daea564e84')
-DATA_DIR = '/Users/dylanrochex/Projects/HVAC_leads_googleads/data'
+load_dotenv()
+
+VAPI_API_KEY = os.environ.get('VAPI_API_KEY', '')
+DATA_DIR = str(Path(__file__).resolve().parent / 'data')
 
 def main():
+    if not VAPI_API_KEY:
+        print("❌ VAPI_API_KEY not set. Copy env.example to .env and fill in your key.")
+        return
+
     # Load all calls from Vapi
     print("Fetching calls from Vapi...")
     resp = requests.get(

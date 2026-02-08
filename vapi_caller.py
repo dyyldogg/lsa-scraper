@@ -29,13 +29,15 @@ PST = timezone(timedelta(hours=-8))
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
-VAPI_API_KEY = os.environ.get("VAPI_API_KEY", "YOUR_VAPI_API_KEY")
+from dotenv import load_dotenv
+load_dotenv()
+
+VAPI_API_KEY = os.environ.get("VAPI_API_KEY", "")
 VAPI_BASE_URL = "https://api.vapi.ai"
 
-# Your Vapi phone number ID - Using Twilio number (+1 310-879-1266) for now
-# Telnyx needs outbound voice profile configured - use Twilio until Telnyx is set up
+# Your Vapi phone number ID
 # Get it from: Vapi Dashboard > Phone Numbers > click your number > copy the ID
-VAPI_PHONE_ID = os.environ.get("VAPI_PHONE_ID", "ea6c590f-5bd7-4eed-9113-dbfda934816a")
+VAPI_PHONE_ID = os.environ.get("VAPI_PHONE_ID", "")
 
 OUTPUT_DIR = Path("data")
 OUTPUT_DIR.mkdir(exist_ok=True)
@@ -99,8 +101,8 @@ class VapiCaller:
     
     def __init__(self, api_key: str = None):
         self.api_key = api_key or VAPI_API_KEY
-        if self.api_key == "YOUR_VAPI_API_KEY":
-            raise ValueError("Please set VAPI_API_KEY environment variable")
+        if not self.api_key:
+            raise ValueError("VAPI_API_KEY not set. Copy env.example to .env and fill in your key.")
         
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
@@ -501,21 +503,22 @@ def run_audit(
 ):
     """Run the audit calls."""
     
-    if VAPI_API_KEY == "YOUR_VAPI_API_KEY":
-        print("\n❌ Vapi API key not configured!")
+    if not VAPI_API_KEY:
+        print("\n❌ VAPI_API_KEY not set!")
         print("\nSetup:")
-        print("1. Go to https://vapi.ai and sign up")
-        print("2. Get your API key from the dashboard")
-        print("3. Run: export VAPI_API_KEY='your_key_here'")
+        print("1. Copy env.example to .env")
+        print("2. Go to https://vapi.ai and sign up")
+        print("3. Get your API key from the dashboard")
+        print("4. Add it to .env: VAPI_API_KEY=your_key_here")
         return
     
     if not VAPI_PHONE_ID:
-        print("\n❌ No phone number configured!")
+        print("\n❌ VAPI_PHONE_ID not set!")
         print("\nSetup:")
         print("1. Go to Vapi Dashboard > Phone Numbers")
         print("2. Import your Twilio number (or buy one)")
         print("3. Click the number and copy the ID")
-        print("4. Run: export VAPI_PHONE_ID='your_phone_id_here'")
+        print("4. Add it to .env: VAPI_PHONE_ID=your_phone_id_here")
         return
     
     caller = VapiCaller()

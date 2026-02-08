@@ -23,6 +23,12 @@ TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN", "")
 TWILIO_PHONE_NUMBER = os.getenv("TWILIO_PHONE_NUMBER", "")
 TWILIO_WEBHOOK_URL = os.getenv("TWILIO_WEBHOOK_URL", "")
 
+# Vapi.ai Configuration (AI caller)
+VAPI_API_KEY = os.getenv("VAPI_API_KEY", "")
+VAPI_BASE_URL = "https://api.vapi.ai"
+VAPI_PHONE_ID = os.getenv("VAPI_PHONE_ID", "")
+VAPI_ASSISTANT_ID = os.getenv("VAPI_ASSISTANT_ID", "")  # Optional - auto-creates if empty
+
 # Database
 DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{BASE_DIR / 'nightline.db'}")
 

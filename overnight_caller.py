@@ -17,10 +17,13 @@ from pathlib import Path
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
-VAPI_API_KEY = os.environ.get("VAPI_API_KEY", "d6dc0c9c-3cc7-40f7-a67f-16daea564e84")
+from dotenv import load_dotenv
+load_dotenv()
+
+VAPI_API_KEY = os.environ.get("VAPI_API_KEY", "")
 VAPI_BASE_URL = "https://api.vapi.ai"
-VAPI_PHONE_ID = "ea6c590f-5bd7-4eed-9113-dbfda934816a"  # Twilio number
-ASSISTANT_ID = "bd931f9a-77bd-4d4e-9e59-e003ed78a3f0"   # Stealth assistant
+VAPI_PHONE_ID = os.environ.get("VAPI_PHONE_ID", "")
+ASSISTANT_ID = os.environ.get("VAPI_ASSISTANT_ID", "")
 
 OUTPUT_DIR = Path("data")
 PST = timezone(timedelta(hours=-8))
@@ -207,6 +210,21 @@ def main():
     print("=" * 60)
     print("🌙 OVERNIGHT AUTONOMOUS CALLER")
     print("=" * 60)
+
+    # Validate required env vars
+    missing = []
+    if not VAPI_API_KEY:
+        missing.append("VAPI_API_KEY")
+    if not VAPI_PHONE_ID:
+        missing.append("VAPI_PHONE_ID")
+    if not ASSISTANT_ID:
+        missing.append("VAPI_ASSISTANT_ID")
+    if missing:
+        print(f"\n❌ Missing required environment variables: {', '.join(missing)}")
+        print("   Copy env.example to .env and fill in your values.")
+        print("   See README.md for setup instructions.")
+        return
+
     print(f"   Started: {datetime.now(PST).strftime('%Y-%m-%d %I:%M %p PST')}")
     print(f"   Max calls: {MAX_CALLS}")
     print(f"   Save every: {SAVE_EVERY} calls")
