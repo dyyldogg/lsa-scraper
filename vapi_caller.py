@@ -66,33 +66,34 @@ ASSISTANT_CONFIG = {
         "messages": [
             {
                 "role": "system", 
-                "content": """Silent listener. Rules:
-1. STAY SILENT until human speaks
-2. IVR menu: press key for emergency/service/operator. If unsure press 0
-3. Voicemail ("leave message"/"beep"): hang up with endCall
-4. Human answers: say "Sorry wrong number!" then endCall
-5. Never explain why calling"""
+                "content": """You are a COMPLETELY SILENT call observer. ABSOLUTE rules:
+1. NEVER speak. Do not say a single word. Stay 100% silent the entire call.
+2. IVR menu: press the key for service/emergency/operator/receptionist. If unsure press 0.
+3. STAY ON THE LINE through everything: hold music, disclaimers like "this call may be recorded", "please hold", ringing, silence - WAIT through all of it. Do NOT hang up.
+4. Only use endCall if you hear a CLEAR voicemail beep/tone asking you to leave a message (the actual beep, not just a greeting).
+5. If a real human answers and speaks to you directly (asks who you are, how they can help), stay silent for 3 seconds then endCall.
+6. You NEVER speak. No greetings, no apologies, no words at all. Total silence."""
             }
         ],
         "temperature": 0.1,
-        "maxTokens": 50  # Limit response length = less cost
+        "maxTokens": 50  # Minimum allowed by Vapi
     },
     "voice": {
-        "provider": "deepgram",  # CHEAPEST voice - 40x cheaper than ElevenLabs
-        "voiceId": "asteria"  # Valid Deepgram voice ID
+        "provider": "deepgram",  # CHEAPEST voice
+        "voiceId": "asteria"
     },
     "firstMessage": "",
     "firstMessageMode": "assistant-waits-for-user",
     "dialKeypadFunctionEnabled": True,
     "endCallFunctionEnabled": True,
-    "silenceTimeoutSeconds": 15,  # Shorter = less cost
-    "maxDurationSeconds": 60,  # Max 1 min per call
+    "silenceTimeoutSeconds": 25,  # Wait through disclaimers/hold but don't waste time on dead air
+    "maxDurationSeconds": 120,  # 2 min max - enough to get through IVR + hold to a person
     "transcriber": {
         "provider": "deepgram",  # Cheapest transcriber
         "model": "nova-2",
         "language": "en"
     },
-    "recordingEnabled": False  # Disable recording = saves storage cost
+    "recordingEnabled": False
 }
 
 
@@ -129,27 +130,41 @@ class VapiCaller:
         # Delete ALL old assistants if forcing new
         if force_new and response.status_code == 200:
             assistants = response.json()
-            for asst in assistants:
-                requests.delete(
+            print(f"   Deleting {len(assistants)} old assistants...")
+            for i, asst in enumerate(assistants):
+                resp_del = requests.delete(
                     f"{VAPI_BASE_URL}/assistant/{asst['id']}",
                     headers=self.headers
                 )
-                print(f"   Deleted old assistant: {asst['id']}")
+                if resp_del.status_code == 429:
+                    print(f"   Rate limited, waiting 5s...")
+                    time.sleep(5)
+                    requests.delete(f"{VAPI_BASE_URL}/assistant/{asst['id']}", headers=self.headers)
+                if i % 5 == 4:
+                    time.sleep(1)  # Brief pause every 5 deletes
+            print(f"   Deleted all old assistants")
         
-        # Create new assistant with updated config
-        response = requests.post(
-            f"{VAPI_BASE_URL}/assistant",
-            headers=self.headers,
-            json=ASSISTANT_CONFIG
-        )
+        # Create new assistant with updated config (with retry for rate limits)
+        for attempt in range(3):
+            response = requests.post(
+                f"{VAPI_BASE_URL}/assistant",
+                headers=self.headers,
+                json=ASSISTANT_CONFIG
+            )
+            
+            if response.status_code in [200, 201]:
+                data = response.json()
+                self.assistant_id = data["id"]
+                print(f"   Created NEW assistant: {self.assistant_id}")
+                return self.assistant_id
+            elif response.status_code == 429:
+                wait = 10 * (attempt + 1)
+                print(f"   Rate limited, waiting {wait}s...")
+                time.sleep(wait)
+            else:
+                raise Exception(f"Failed to create assistant: {response.text}")
         
-        if response.status_code in [200, 201]:
-            data = response.json()
-            self.assistant_id = data["id"]
-            print(f"   Created NEW assistant with IVR support: {self.assistant_id}")
-            return self.assistant_id
-        else:
-            raise Exception(f"Failed to create assistant: {response.text}")
+        raise Exception("Failed to create assistant after 3 attempts (rate limited)")
     
     def make_call(self, phone_number: str, business_name: str = "") -> Dict:
         """
@@ -203,27 +218,44 @@ class VapiCaller:
         
         return result
     
-    def _wait_for_completion(self, call_id: str, timeout: int = 180) -> Dict:
+    def _wait_for_completion(self, call_id: str, timeout: int = 150) -> Dict:
         """Wait for call to complete and get results."""
         start_time = time.time()
+        poll_interval = 2  # Start fast
         
         while time.time() - start_time < timeout:
-            response = requests.get(
-                f"{VAPI_BASE_URL}/call/{call_id}",
-                headers=self.headers
-            )
-            
-            if response.status_code != 200:
-                time.sleep(2)
+            try:
+                response = requests.get(
+                    f"{VAPI_BASE_URL}/call/{call_id}",
+                    headers=self.headers,
+                    timeout=10
+                )
+                
+                if response.status_code != 200:
+                    time.sleep(2)
+                    continue
+                
+                # Guard against empty responses
+                if not response.text or not response.text.strip():
+                    time.sleep(2)
+                    continue
+                
+                call = response.json()
+                status = call.get("status")
+                
+                if status in ["ended", "failed"]:
+                    return self._analyze_call(call)
+                
+            except (requests.exceptions.JSONDecodeError, requests.exceptions.ConnectionError, 
+                    requests.exceptions.Timeout, Exception) as e:
+                print(f"      ⚠️ Poll error: {e}, retrying...")
+                time.sleep(3)
                 continue
             
-            call = response.json()
-            status = call.get("status")
-            
-            if status in ["ended", "failed"]:
-                return self._analyze_call(call)
-            
-            time.sleep(3)
+            time.sleep(poll_interval)
+            # After 30s, slow down polling slightly
+            if time.time() - start_time > 30:
+                poll_interval = 3
         
         return {"status": "timeout", "call_id": call_id}
     
@@ -248,6 +280,27 @@ class VapiCaller:
         # AI Analysis - determine what answered
         analysis = self._classify_response(transcript_text, end_reason, duration)
         
+        # Build a human-readable summary of what happened
+        summary_parts = []
+        summary_parts.append(f"Duration: {duration}s")
+        summary_parts.append(f"End reason: {end_reason}")
+        
+        if not transcript_text.strip():
+            summary_parts.append("Nobody spoke / silence the whole time")
+        else:
+            # Count how many different speakers
+            lines = [l for l in transcript_text.strip().split('\n') if l.strip()]
+            summary_parts.append(f"Transcript lines: {len(lines)}")
+        
+        if "press" in transcript_text.lower() or "menu" in transcript_text.lower():
+            summary_parts.append("Had IVR/phone menu")
+        if "leave" in transcript_text.lower() and "message" in transcript_text.lower():
+            summary_parts.append("Hit voicemail prompt")
+        if "answering service" in transcript_text.lower() or "how can i help" in transcript_text.lower():
+            summary_parts.append("Answering service picked up")
+            
+        analysis["summary"] = " | ".join(summary_parts)
+        
         return {
             "status": "completed",
             "call_id": call.get("id"),
@@ -259,17 +312,9 @@ class VapiCaller:
         }
     
     def _classify_response(self, transcript: str, end_reason: str, duration: int) -> Dict:
-        """Classify what answered the call based on transcript and end reason."""
+        """Classify what answered the call using Grok 4 Fast reasoning."""
         
-        transcript_lower = transcript.lower() if transcript else ""
-        
-        # Classification logic
-        answered_by = "unknown"
-        is_qualified = False
-        confidence = "medium"
-        notes = ""
-        
-        # FIRST: Check end_reason - this is most reliable
+        # FIRST: Check end_reason for obvious cases
         if end_reason == "customer-did-not-answer":
             return {
                 "answered_by": "no_answer",
@@ -286,91 +331,140 @@ class VapiCaller:
                 "notes": "Line busy - retry later"
             }
         
-        if end_reason in ["silence-timed-out", "assistant-did-not-speak"]:
-            # Check if there was any human speech in transcript
-            if not transcript_lower or len(transcript_lower.strip()) < 50:
-                return {
-                    "answered_by": "voicemail_or_no_answer",
-                    "is_qualified": True,
-                    "confidence": "high",
-                    "notes": "Silence/Voicemail - QUALIFIED LEAD! 🎯"
-                }
+        # Strip out the system prompt from transcript before analyzing
+        user_transcript = ""
+        if transcript:
+            lines = transcript.strip().split('\n')
+            user_lines = [l for l in lines if not l.startswith("system:")]
+            user_transcript = '\n'.join(user_lines).strip()
         
-        # Check for voicemail indicators
-        voicemail_indicators = [
-            "leave a message", "leave your message", "after the tone",
-            "after the beep", "not available", "can't come to the phone",
-            "voicemail", "mailbox", "record your message", "please leave",
-            "at the tone", "currently unavailable"
-        ]
+        # If no meaningful transcript, it's silence/no answer
+        if not user_transcript or len(user_transcript) < 10:
+            return {
+                "answered_by": "no_answer",
+                "is_qualified": True,
+                "confidence": "high",
+                "notes": "Silence/No answer - QUALIFIED LEAD! 🎯"
+            }
         
-        # Check for answering service indicators  
-        service_indicators = [
-            "how may i help", "how can i help", "what is your emergency",
-            "can i get your name", "may i have your", "what's the address",
-            "answering service", "after hours service", "on-call",
-            "let me dispatch", "i'll page", "callback number",
-            "this call may be recorded", "may be monitored"
-        ]
+        # Use Grok 4 Fast to classify
+        try:
+            return self._grok_classify(user_transcript, end_reason, duration)
+        except Exception as e:
+            print(f"      ⚠️ Grok classification failed: {e}, using fallback")
+            return self._fallback_classify(user_transcript, end_reason, duration)
+    
+    def _grok_classify(self, transcript: str, end_reason: str, duration: int) -> Dict:
+        """Use Grok 4 Fast reasoning to classify the call."""
+        import os
         
-        # Check for IVR indicators
-        ivr_indicators = [
-            "press 1", "press 2", "press one", "press two",
-            "dial 0", "for sales", "for service", "for emergencies",
-            "main menu", "please select", "extension"
-        ]
+        xai_key = os.environ.get("XAI_API_KEY", "")
+        if not xai_key:
+            raise ValueError("XAI_API_KEY not set")
         
-        # Check for human conversation indicators
-        human_indicators = [
-            "wrong number", "no problem", "have a good", "you too",
-            "can i help you", "what do you need", "who is this",
-            "hello", "hi there", "good evening"
-        ]
+        prompt = f"""You are analyzing phone call transcripts. We called a personal injury law firm after hours using a SILENT AI caller that never speaks. Our goal is to audit whether a REAL LIVE PERSON eventually answers.
+
+IMPORTANT TRANSCRIPT FORMAT:
+- "bot:" lines = OUR silent AI caller (always empty/silent, ignore these)
+- "user:" lines = THE OTHER SIDE (the law firm's phone system or whoever picked up)
+
+TRANSCRIPT:
+{transcript}
+
+CALL END REASON: {end_reason}
+CALL DURATION: {duration} seconds
+
+CRITICAL RULE ABOUT "THIS CALL MAY BE RECORDED":
+Phrases like "this call may be recorded", "this call is recorded", "this call will be recorded for quality purposes", "this call may be monitored" are just standard PRE-CALL DISCLAIMERS. They are automated messages that play BEFORE you get connected to anyone. By themselves they do NOT prove an answering service or live person answered. They are just legal disclaimers. Ignore them for classification purposes.
+
+Classify what answered the phone into exactly ONE category:
+
+1. voicemail - A RECORDED greeting followed by a beep/tone to leave a message. Key signs: "leave a message after the beep/tone", "please leave your name and number", "not available right now". The key indicator is that the greeting ends and waits for the caller to record a message.
+
+2. answering_service - A REAL LIVE PERSON picked up and interacted. The proof is HUMAN CONVERSATION: they ask questions ("how may I help you?", "what is your name?", "are you calling about a new case?"), they react to silence ("hello? is anyone there?"), they have back-and-forth dialogue. A named person answering ("this is Christina") is strong evidence. The key difference from voicemail: a live person RESPONDS and REACTS.
+
+3. human - A real employee or lawyer at the firm answered directly (same as answering_service for our purposes, but this is someone at the actual firm, not a third-party service).
+
+4. ivr_only - An automated phone tree menu ("press 1 for...", "press 2 for...") with no live person reached and no voicemail.
+
+5. no_answer - Nobody/nothing answered. Just ringing, silence, or the call disconnected. Also use this if the ONLY thing heard was a pre-call disclaimer ("this call may be recorded") with no human interaction after it.
+
+6. inconclusive - The call was too short or the transcript is too incomplete to determine what happened. Use this when only a pre-call disclaimer was heard and the call ended before we could tell if anyone would answer.
+
+Respond in EXACTLY this JSON format and nothing else:
+{{"answered_by": "category", "is_qualified": true/false, "confidence": "high/medium/low", "notes": "1-2 sentence explanation of what happened on the call"}}
+
+Qualification rules:
+- voicemail = TRUE (firm is missing calls - great lead!)
+- no_answer = TRUE (nobody picked up at all)
+- ivr_only = TRUE (automated menu, no human coverage)
+- inconclusive = TRUE (call ended too early, needs retry - but likely no live coverage)
+- answering_service = FALSE (firm has live phone coverage)
+- human = FALSE (firm has live phone coverage)"""
+
+        resp = requests.post(
+            "https://api.x.ai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {xai_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "grok-3-fast",
+                "messages": [{"role": "user", "content": prompt}],
+                "temperature": 0.1
+            },
+            timeout=15
+        )
         
-        # Analyze transcript
-        has_voicemail = any(ind in transcript_lower for ind in voicemail_indicators)
-        has_service = any(ind in transcript_lower for ind in service_indicators)
-        has_ivr = any(ind in transcript_lower for ind in ivr_indicators)
-        has_human = any(ind in transcript_lower for ind in human_indicators)
+        if resp.status_code != 200:
+            raise Exception(f"Grok API error {resp.status_code}: {resp.text[:200]}")
         
-        # Determine classification based on transcript content
-        if has_service:
-            answered_by = "answering_service"
-            is_qualified = False
-            confidence = "high"
-            notes = "Answering service detected - they have after-hours coverage"
-        elif has_voicemail:
-            answered_by = "voicemail"
-            is_qualified = True
-            confidence = "high"
-            notes = "Voicemail detected - QUALIFIED LEAD! 🎯"
-        elif has_human and not has_ivr:
-            answered_by = "human"
-            is_qualified = False
-            confidence = "high"
-            notes = "Human answered the call"
-        elif has_ivr and not has_human and not has_service:
-            answered_by = "ivr_only"
-            is_qualified = True
-            confidence = "medium"
-            notes = "IVR menu but no human - likely QUALIFIED"
-        elif duration and duration < 10:
-            answered_by = "no_answer"
-            is_qualified = True
-            confidence = "high"
-            notes = "Call too short - QUALIFIED LEAD! 🎯"
-        else:
-            answered_by = "unknown"
-            is_qualified = False
-            confidence = "low"
-            notes = "Could not determine - manual review needed"
+        content = resp.json()["choices"][0]["message"]["content"].strip()
         
+        # Parse JSON from response (handle markdown code blocks)
+        if "```" in content:
+            content = content.split("```")[1]
+            if content.startswith("json"):
+                content = content[4:]
+            content = content.strip()
+        
+        result = json.loads(content)
+        
+        # Ensure required fields
         return {
-            "answered_by": answered_by,
-            "is_qualified": is_qualified,
-            "confidence": confidence,
-            "notes": notes
+            "answered_by": result.get("answered_by", "unknown"),
+            "is_qualified": result.get("is_qualified", False),
+            "confidence": result.get("confidence", "medium"),
+            "notes": result.get("notes", "Classified by Grok 4 Fast")
         }
+    
+    def _fallback_classify(self, transcript: str, end_reason: str, duration: int) -> Dict:
+        """Simple fallback if Grok is unavailable."""
+        transcript_lower = transcript.lower()
+        
+        # These are just disclaimers - strip them out before analyzing
+        disclaimer_phrases = ["this call may be recorded", "this call is recorded", "this call will be recorded",
+                              "this call may be monitored", "for quality assurance", "for quality purposes",
+                              "for training purposes", "for quality and training"]
+        cleaned = transcript_lower
+        for phrase in disclaimer_phrases:
+            cleaned = cleaned.replace(phrase, "")
+        cleaned = cleaned.strip()
+        
+        voicemail_words = ["leave a message", "after the beep", "voicemail", "not available", "mailbox", "at the tone", "leave your name"]
+        # Real human interaction indicators (not disclaimers)
+        live_person_words = ["how may i help", "how can i help", "is anyone there", "hello?",
+                             "are you calling about", "what is your name", "can i get your name",
+                             "what is this regarding", "i'll transfer", "let me connect"]
+        
+        if any(w in cleaned for w in live_person_words):
+            return {"answered_by": "answering_service", "is_qualified": False, "confidence": "medium", "notes": "Live person detected (fallback classifier)"}
+        elif any(w in cleaned for w in voicemail_words):
+            return {"answered_by": "voicemail", "is_qualified": True, "confidence": "medium", "notes": "Voicemail detected (fallback classifier)"}
+        elif not cleaned or len(cleaned) < 10:
+            return {"answered_by": "inconclusive", "is_qualified": True, "confidence": "low", "notes": "Only disclaimers heard, call ended too early (fallback) - retry needed"}
+        else:
+            return {"answered_by": "unknown", "is_qualified": False, "confidence": "low", "notes": "Could not classify (fallback) - manual review needed"}
 
 
 # Also add helper to show nice summary
@@ -432,6 +526,8 @@ def save_results(results: List[Dict], filename: str = None):
             'result',              # voicemail/human/no_answer/answering_service
             'qualified_lead',      # TRUE = no one answered = potential sale
             'duration_sec',        # Call length
+            'summary',             # What happened step by step
+            'transcript',          # Full transcript of what was heard
             'notes'                # AI analysis
         ])
         
@@ -446,6 +542,8 @@ def save_results(results: List[Dict], filename: str = None):
                 analysis.get('answered_by', 'unknown'),
                 'TRUE' if analysis.get('is_qualified') else 'FALSE',
                 r.get('duration_seconds', ''),
+                analysis.get('summary', ''),
+                r.get('transcript', '').strip(),
                 analysis.get('notes', '')
             ])
     
@@ -549,7 +647,12 @@ def run_audit(
         print(f"   Phone: {lead['phone']}")
         print(f"   Location: {lead.get('location', 'N/A')}")
         
-        result = caller.make_call(lead['phone'], lead['name'])
+        try:
+            result = caller.make_call(lead['phone'], lead['name'])
+        except Exception as e:
+            print(f"   ❌ Call failed: {e}")
+            result = {"status": "error", "error": str(e), "phone": lead['phone'], "business_name": lead['name']}
+        
         result['location'] = lead.get('location', '')
         result['is_24h'] = lead.get('is_24h', False)
         results.append(result)
@@ -561,26 +664,36 @@ def run_audit(
         
         stats['total'] += 1
         
+        summary = analysis.get('summary', '')
         if is_qualified:
             print(f"   ✅ QUALIFIED - {analysis.get('notes', '')}")
+            print(f"      {summary}")
             stats['qualified'] += 1
         elif answered_by == 'human':
             print(f"   👤 Human answered")
+            print(f"      {summary}")
             stats['answered'] += 1
         elif answered_by == 'answering_service':
             print(f"   🏢 Answering service")
+            print(f"      {summary}")
             stats['service'] += 1
         else:
             print(f"   ❓ {answered_by}")
+            print(f"      {summary}")
             stats['failed'] += 1
+        
+        # Auto-save every 25 calls so we don't lose progress
+        if i % 25 == 0:
+            print(f"\n   💾 Auto-saving progress ({i}/{len(leads)})...")
+            save_results(results)
         
         # Delay between calls
         if i < len(leads):
             print(f"   ⏳ Waiting {delay}s...")
             time.sleep(delay)
     
-    # Save results
-    print(f"\n💾 Saving results...")
+    # Final save
+    print(f"\n💾 Saving final results...")
     save_results(results)
     
     # Summary
